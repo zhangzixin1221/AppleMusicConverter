@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amc-applemusic-converter"
+version = "1.0.0"
+description = "Convert audio files into Apple Music importable files with embedded cover art and lyrics, under a per-track size budget."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["apple-music", "itunes", "alac", "ffmpeg", "lyrics", "cover-art", "converter"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Conversion",
+]
+dependencies = ["mutagen>=1.45"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pyinstaller>=6"]
+
+[project.scripts]
+amc = "amc.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/zhangzixin1221/AppleMusicConverter"
+Issues = "https://github.com/zhangzixin1221/AppleMusicConverter/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

@@ -1,0 +1,6 @@
+# 运行依赖
+mutagen>=1.45
+
+# 开发/打包依赖（可选）：pip install -e ".[dev]"
+# pytest>=7
+# pyinstaller>=6
