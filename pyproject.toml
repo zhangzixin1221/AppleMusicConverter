@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amc-applemusic-converter"
-version = "1.0.0"
+version = "1.1.0"
 description = "Convert audio files into Apple Music importable files with embedded cover art and lyrics, under a per-track size budget."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,3 +38,6 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
+markers = [
+    "integration: drives a real ffmpeg; skipped automatically when it is missing",
+]
