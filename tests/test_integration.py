@@ -469,3 +469,92 @@ def test_gbk_bytes_in_latin1_id3_frame_are_repaired(media):
     assert str(tags["TPE1"]) == "周杰伦", "乱码必须被修好"
     assert str(tags["TIT2"]) == "夜曲"           # was already clean
     assert tags.version == (2, 3, 0)
+
+
+# --------------------------------------------------------------------------
+# manual metadata (v1.3: fill what the file is missing, never overwrite)
+# --------------------------------------------------------------------------
+
+def test_manual_metadata_fills_only_the_missing_fields(media):
+    """A file with an embedded title keeps it; the override only adds the rest."""
+    src = media.tone("匿名.flac", tags={"title": "内嵌标题"})
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50,
+                     meta={"artist": "手工歌手", "genre": "流行"})
+
+    assert res.ok, res.error
+    tags = mp4_tags(res.dest)
+    assert tags["\xa9nam"] == ["内嵌标题"], "内嵌信息必须原样继承"
+    assert tags["\xa9ART"] == ["手工歌手"]
+    assert tags["\xa9gen"] == ["流行"]
+    assert "手动填写: 歌手、流派" in res.meta_from
+
+
+def test_manual_metadata_outranks_the_filename_guess(media):
+    src = media.tone("邓紫棋 - 泡沫.flac")          # no tags at all
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50,
+                     meta={"album": "Xposed"})
+
+    assert res.ok, res.error
+    tags = mp4_tags(res.dest)
+    assert tags["\xa9alb"] == ["Xposed"]
+    assert tags["\xa9ART"] == ["邓紫棋"]            # from the file name
+    assert tags["\xa9nam"] == ["泡沫"]
+    assert res.meta_from == "手动填写: 专辑; 文件名补全: 歌名、歌手"
+
+
+def test_per_file_overrides_do_not_leak_into_other_files(media):
+    first = media.tone("甲.flac", tags={"title": "甲", "artist": "原歌手甲"})
+    second = media.tone("乙.flac", tags={"title": "乙", "artist": "原歌手乙"})
+
+    res_a = convert_file(first, Options(outdir=media.dir / "out", target_mb=50),
+                         lambda _m: None, overrides={"artist": "只属于甲"})
+    res_b = convert_file(second, Options(outdir=media.dir / "out", target_mb=50),
+                         lambda _m: None)
+
+    assert res_a.ok and res_b.ok
+    # The override fills nothing (the file already has an artist) and so is inert.
+    assert mp4_tags(res_a.dest)["\xa9ART"] == ["原歌手甲"]
+    assert mp4_tags(res_b.dest)["\xa9ART"] == ["原歌手乙"]
+
+
+# --------------------------------------------------------------------------
+# forced output format
+# --------------------------------------------------------------------------
+
+@pytest.mark.skipif(not can_encode("libmp3lame"), reason="ffmpeg 缺少 MP3 编码器")
+def test_forced_mp3_output_lands_in_an_mp3_with_id3(media):
+    src = media.tone("song.flac", tags={"title": "夜曲", "artist": "周杰伦"})
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50, out_format="mp3")
+
+    assert res.ok, res.error
+    assert res.dest.suffix == ".mp3"
+    assert res.plan.mode == "mp3"
+    from mutagen.id3 import ID3
+    tags = ID3(str(res.dest))
+    assert str(tags["TIT2"]) == "夜曲"
+    assert str(tags["TPE1"]) == "周杰伦"
+
+
+def test_forced_aac_output_skips_lossless(media):
+    src = media.tone("song.flac")
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50, out_format="aac")
+
+    assert res.ok, res.error
+    assert res.plan.mode == "aac"
+    assert res.dest.suffix == ".m4a"
+
+
+@pytest.mark.skipif(not can_encode("libmp3lame"), reason="ffmpeg 缺少 MP3 编码器")
+def test_forced_mp3_passes_an_mp3_source_through_untouched(media):
+    src = media.tone("keep.mp3", codec="libmp3lame", bitrate="192k",
+                     tags={"title": "原地"})
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50, out_format="mp3")
+
+    assert res.ok, res.error
+    assert res.plan.mode == "copy"
+    assert res.dest.suffix == ".mp3"

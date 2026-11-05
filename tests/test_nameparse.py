@@ -116,6 +116,24 @@ def test_disc_folder():
     assert got["album"] == "依然范特西"
 
 
+def test_code_like_folders_are_not_albums():
+    """Hand-made working folders ("in", "in12", "2026") are not release titles."""
+    for folder in (r"D:\x\in", r"D:\x\out", r"D:\x\in12", r"D:\x\CD-1",
+                   r"D:\x\2026"):
+        got = parse_path(Path(folder) / "邓紫棋 - 泡沫.flac")
+        assert "album" not in got, folder
+        assert got["title"] == "泡沫" and got["artist"] == "邓紫棋"
+
+
+def test_number_heavy_titles_survive_the_code_filter():
+    """Real releases that merely contain digits must keep reading as albums."""
+    for folder, album in ((r"D:\x\7 Days", "7 Days"),
+                          (r"D:\x\99 Problems", "99 Problems"),
+                          (r"D:\x\H2O", "H2O"),
+                          (r"D:\x\叶惠美", "叶惠美")):
+        assert parse_path(Path(folder) / "01 Song.flac").get("album") == album
+
+
 def test_folder_matching_artist_is_not_an_album():
     got = parse_path(P("郁可唯", "时间煮雨.flac"))
     assert "album" not in got

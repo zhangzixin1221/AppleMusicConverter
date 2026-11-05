@@ -52,7 +52,17 @@ _GENERIC_FOLDERS = {
     "music", "audio", "songs", "tracks", "album", "albums", "downloads",
     "download", "temp",
     "tmp", "新建文件夹", "未命名", "歌曲", "音乐", "下载", "音频", "flac", "mp3",
+    # Short hand-made folders ("D:\x\in") say nothing about the album either.
+    "in", "input", "out", "output", "src", "source", "data", "media", "files",
 }
+
+# Digits in a folder name are property numbers, not albums: "in12", "CD-1",
+# "2026", "upload_3". A leading digit is too common in real titles ("7 Days",
+# "99 Problems"), so it only counts the other way round: letters *followed* by
+# digits, or a digit-led name with no real word after it.
+_LOOKS_LIKE_CODE = re.compile(
+    r"^(?:[^\W\d_]{2,3}[\s._-]?\d+[^\W\d_]{0,3}"
+    r"|\d+[\s._-]?[^\W\d_]{0,3})$")
 _YEAR = re.compile(r"[\[【(（]?\s*((?:19|20)\d{2})\s*(?:年)?[\]】)）]?")
 _DISC_DIR = re.compile(r"^(?:cd|disc|磁盘)\s*(\d{1,2})$", re.IGNORECASE)
 
@@ -116,6 +126,9 @@ def _folder_album(folder: Path, artist: str, has_track: bool) -> tuple[str, str]
     if year:
         cleaned = _clean(_YEAR.sub("", cleaned).strip(" -－–—·"))
     if len(cleaned) < 2:
+        return "", ""
+    if _LOOKS_LIKE_CODE.match(cleaned):
+        # "in12", "CD-1", "2026": a code, not a release title.
         return "", ""
     if artist and _norm(cleaned) == _norm(artist):
         return "", ""

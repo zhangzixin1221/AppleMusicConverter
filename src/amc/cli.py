@@ -9,7 +9,8 @@ import threading
 from pathlib import Path
 
 from . import __version__
-from .core import (AMCCancelled, Options, collect_inputs, convert_file, fmt_size)
+from .core import (AMCCancelled, META_FIELDS, Options, _FIELD_CN, collect_inputs,
+                   convert_file, fmt_size, normalize_meta_key)
 
 
 # --------------------------------------------------------------------------
@@ -35,7 +36,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-name", action="store_true",
                    help="保留原文件名（默认用「歌手 - 标题」重命名）")
     p.add_argument("--force-alac", action="store_true",
-                   help="强制输出 ALAC 无损，即使源已是 MP3/AAC")
+                   help="强制输出 ALAC 无损，即使源已是 MP3/AAC（等价 --format alac）")
+    p.add_argument("--format", dest="out_format", default="auto",
+                   choices=("auto", "alac", "aac", "mp3"),
+                   help="输出格式：auto=优先无损（默认）；alac=强制 ALAC；"
+                        "aac=强制 AAC(m4a)；mp3=强制 MP3(上限 320kbps)")
+    p.add_argument("--meta", action="append", metavar="KEY=值", default=[],
+                   help="手动补全缺失信息（只填文件里没有的字段，内嵌标签不动），"
+                        "可重复。KEY: title/artist/album/album_artist/date/genre/"
+                        "track/disc。例: --meta artist=周杰伦 --meta album=叶惠美")
     p.add_argument("--recursive", "-r", action="store_true",
                    help="递归扫描子文件夹（默认只处理文件夹第一层）")
     p.add_argument("--lyrics-encoding", help="强制外挂歌词编码，如 gbk / big5 / utf-8")
@@ -76,15 +85,29 @@ def run_cli(args) -> int:
                   file=sys.stderr)
         return 2
 
+    meta: dict[str, str] = {}
+    for item in args.meta:
+        key, sep, value = item.partition("=")
+        canonical = normalize_meta_key(key.lower()) if sep else None
+        if canonical is None:
+            p_msg = ("--meta 需要 字段=值 形式，字段可以是 "
+                     + "/".join(META_FIELDS) + " 或中文 "
+                     + "/".join(_FIELD_CN.values()))
+            print(f"参数错误: {p_msg}（收到: {item!r}）", file=sys.stderr)
+            return 2
+        meta[canonical] = value.strip()
+
     opts = Options(
         outdir=Path(args.out).expanduser() if args.out else None,
         target_mb=args.target_mb,
         keep_name=args.keep_name,
         force_alac=args.force_alac,
+        out_format=args.out_format,
         lyrics_encoding=args.lyrics_encoding,
         overwrite=args.overwrite,
         repair_tags=args.repair_tags,
         parse_names=args.parse_names,
+        meta=meta,
     )
 
     def log(msg: str) -> None:
@@ -95,8 +118,11 @@ def run_cli(args) -> int:
     _install_sigint(cancel)
 
     limit = "不限制" if opts.target_mb <= 0 else f"{opts.target_mb:g}MB"
+    fmt_note = {"auto": "", "alac": "，强制 ALAC", "aac": "，强制 AAC",
+                "mp3": "，强制 MP3"}.get(opts.out_format, "")
     print(f"共 {len(targets)} 个文件，单曲上限 {limit}"
-          f"{'，覆盖已有输出' if opts.overwrite else '，跳过已存在的输出'}", flush=True)
+          f"{'，覆盖已有输出' if opts.overwrite else '，跳过已存在的输出'}{fmt_note}",
+          flush=True)
 
     ok = warn = fail = 0
     failures: list[tuple[Path, str]] = []

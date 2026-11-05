@@ -47,6 +47,40 @@ def _check_environment() -> int:
     return 0 if not problems else 1
 
 
+def _reglue_paths(argv: list[str]) -> list[str]:
+    """Re-join paths that a broken shell split on their spaces.
+
+    A shell that drops the quotes hands over ``D:\\ProgramData\\Deepseek
+    Harness Workspace\\a.flac`` as three arguments, and ``-`` (from " - "
+    inside a filename) as a fourth. Starting from the first argument that does
+    not exist, ever longer runs of tokens are joined until one does; when
+    nothing joins, the tokens are emitted unchanged, so ordinary calls (every
+    argument already a real path) never move.
+    """
+    out: list[str] = []
+    n = len(argv)
+    i = 0
+    while i < n:
+        tok = argv[i]
+        if tok.startswith("-") and tok != "-" or Path(tok).exists():
+            out.append(tok)
+            i += 1
+            continue
+        joined = None
+        for j in range(i + 1, min(n, i + 6) + 1):
+            cand = " ".join(argv[i:j])
+            if Path(cand).exists():
+                joined = cand
+                i = j
+                break
+        if joined is None:
+            out.append(tok)
+            i += 1
+        else:
+            out.append(joined)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     # A --windowed build has no console attached, which leaves stdout/stderr as
     # None. Give them somewhere to go so logging and error paths still work.
@@ -60,6 +94,13 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+    # Start-Process / a shell that forgot the quotes hands over an unfolded
+    # command line, so one path arrives split into several arguments. Join
+    # the fragments back before anything tries to open a file named
+    # "Deepseek" or "Harness".
+    argv = list(sys.argv[1:] if argv is None else argv)
+    argv = _reglue_paths(argv)
 
     args = build_parser().parse_args(argv)
 

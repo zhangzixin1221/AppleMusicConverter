@@ -25,8 +25,10 @@ import traceback
 from pathlib import Path
 
 from . import __version__
-from .core import (AMCCancelled, AMCError, Options, collect_inputs, convert_file,
-                   ffmpeg, ffprobe, fmt_size)
+from .core import (AMCCancelled, AMCError, META_FIELDS, Options, _FIELD_CN,
+                   _TAG_ALIASES, collect_inputs, convert_file, ffmpeg, ffprobe,
+                   fmt_size, probe)
+from .nameparse import parse_path as parse_names_from_path
 
 # Comfortable starting size; the real one is computed from the layout.
 PREFERRED_WIDTH = 900
@@ -66,6 +68,17 @@ def _apply_style(ttk) -> None:
                     focuscolor=BG)
     style.configure("TEntry", fieldbackground=CARD, bordercolor=BORDER,
                     lightcolor=CARD, darkcolor=CARD, padding=4)
+    style.map("TEntry",
+              fieldbackground=[("disabled", "#e9edf4")],
+              foreground=[("disabled", MUTED)])
+    style.configure("TCombobox", fieldbackground=CARD, background=CARD,
+                    bordercolor=BORDER, lightcolor=CARD, darkcolor=CARD,
+                    arrowcolor=ACCENT, padding=4, foreground=TEXT)
+    style.map("TCombobox",
+              fieldbackground=[("readonly", CARD)],
+              selectbackground=[("readonly", CARD)],
+              selectforeground=[("readonly", TEXT)],
+              bordercolor=[("active", ACCENT)])
     style.configure("TSpinbox", fieldbackground=CARD, bordercolor=BORDER,
                     arrowcolor=ACCENT, padding=4)
     style.configure("Horizontal.TProgressbar", background=ACCENT,
@@ -187,6 +200,9 @@ def run_gui(initial: list[str] | None = None) -> int:
     list_buttons = ttk.Frame(list_frame)
     list_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
     subfolders_var = tk.BooleanVar(value=True)
+    # Per-file manual metadata: {str(Path): {field: value}}. Applied at convert
+    # time only to fields the file does not already carry.
+    meta_overrides: dict[str, dict] = {}
 
     def refresh() -> None:
         tree.delete(*tree.get_children())
@@ -197,7 +213,10 @@ def run_gui(initial: list[str] | None = None) -> int:
             except OSError:
                 size = ""
             folder = p.parent.name if p.parent.name else str(p.parent)
-            tree.insert("", "end", iid=str(i), text=p.name, values=(folder, size),
+            name = p.name
+            if meta_overrides.get(str(p)):
+                name += "  ✎"
+            tree.insert("", "end", iid=str(i), text=name, values=(folder, size),
                         tags=("even" if i % 2 == 0 else "odd",))
         list_frame.configure(text=f"待转换文件（{len(files)} 个）")
         update_buttons()
@@ -237,11 +256,13 @@ def run_gui(initial: list[str] | None = None) -> int:
         if not selection:
             return
         for idx in reversed(selection):
+            meta_overrides.pop(str(Path(files[idx])), None)
             del files[idx]
         refresh()
 
     def clear_all() -> None:
         files.clear()
+        meta_overrides.clear()
         refresh()
 
     add_files_btn = ttk.Button(list_buttons, text="添加文件…", command=add_files)
@@ -252,8 +273,103 @@ def run_gui(initial: list[str] | None = None) -> int:
     remove_btn.pack(side="left", padx=(12, 0))
     clear_btn = ttk.Button(list_buttons, text="清空", command=clear_all)
     clear_btn.pack(side="left", padx=(6, 0))
-    ttk.Checkbutton(list_buttons, text="包含子文件夹",
-                    variable=subfolders_var).pack(side="right")
+    edit_btn = ttk.Button(list_buttons, text="编辑信息…", state="disabled")
+    edit_btn.pack(side="left", padx=(6, 0))
+    # Native tk checkbutton: Windows draws the classic "√" box, which ttk's
+    # clam indicator cannot be restyled into.
+    tk.Checkbutton(list_buttons, text="包含子文件夹", variable=subfolders_var,
+                   bg=BG, activebackground=BG, fg=TEXT, activeforeground=TEXT,
+                   highlightthickness=0, font=base_font).pack(side="right")
+
+    # ---- metadata dialog ----
+    def edit_meta_dialog() -> None:
+        """Let the user fill exactly the fields this file is missing."""
+        selection = selected_indexes()
+        if len(selection) != 1:
+            return
+        src = Path(files[selection[0]])
+        try:
+            info = probe(src, repair_tags=True)
+        except AMCError as exc:
+            messagebox.showerror("无法读取", f"{src.name}\n{exc}")
+            return
+        guessed = parse_names_from_path(src)
+        saved = meta_overrides.get(str(src), {})
+
+        dlg = tk.Toplevel(root)
+        dlg.title(f"编辑信息 · {src.name}")
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.configure(bg=BG)
+        body = ttk.Frame(dlg, padding=(16, 12, 16, 12))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        ttk.Label(body, foreground=MUTED, font=small_font, justify="left",
+                  text="灰色 = 文件已有的内嵌信息，转换时原样继承、不会改动；\n"
+                       "白色 = 缺失字段，填了才会写入（留空跳过，不会被文件名猜测顶替）。"
+            ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        vars_: dict[str, tk.StringVar] = {}
+        for row, key in enumerate(META_FIELDS, start=1):
+            have = info.tag(*_TAG_ALIASES[key])
+            ttk.Label(body, text=_FIELD_CN[key]).grid(
+                row=row, column=0, sticky="w", pady=2, padx=(0, 8))
+            var = tk.StringVar(value=have or saved.get(key, "")
+                               or guessed.get(key, ""))
+            box = ttk.Entry(body, textvariable=var)
+            box.grid(row=row, column=1, sticky="ew", pady=2)
+            if have:
+                box.state(["disabled"])
+            else:
+                vars_[key] = var
+
+        def save() -> None:
+            values = {k: v.get().strip() for k, v in vars_.items()
+                      if v.get().strip()}
+            if values:
+                meta_overrides[str(src)] = values
+            else:
+                meta_overrides.pop(str(src), None)
+            dlg.destroy()
+            refresh()
+
+        btns = ttk.Frame(body)
+        btns.grid(row=1 + len(META_FIELDS), column=0, columnspan=2, sticky="ew",
+                  pady=(10, 0))
+        ttk.Button(btns, text="保存", style="Accent.TButton",
+                   command=save).pack(side="right")
+        ttk.Button(btns, text="取消", command=dlg.destroy).pack(side="right",
+                                                               padx=(0, 6))
+
+        def apply_to_all() -> None:
+            """Push the filled-in fields onto every file, missing them or not."""
+            values = {k: v.get().strip() for k, v in vars_.items()
+                      if v.get().strip()}
+            if not values:
+                dlg.destroy()
+                return
+            for path in files:
+                overrides = dict(meta_overrides.get(str(Path(path)), {}))
+                overrides.update(values)
+                meta_overrides[str(Path(path))] = overrides
+            dlg.destroy()
+            refresh()
+            log_line(f"    信息: 已把 {len(values)} 项填给 {len(files)} 个文件，"
+                     "已有内嵌值的字段不受影响")
+
+        ttk.Button(btns, text="写入全部", command=apply_to_all).pack(side="left")
+        ttk.Label(btns, foreground=MUTED, font=small_font,
+                  text="「写入全部」只补空位，不改已有标签").pack(side="left",
+                                                            padx=(8, 0))
+        dlg.bind("<Return>", lambda _e: save())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        dlg.resizable(False, False)
+        dlg.update_idletasks()
+        x = root.winfo_rootx() + (root.winfo_width() - dlg.winfo_width()) // 2
+        y = root.winfo_rooty() + (root.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    edit_btn.configure(command=edit_meta_dialog)
 
     # ---- options ----
     opt = ttk.LabelFrame(outer, text="转换设置", padding=(8, 6, 8, 8))
@@ -263,9 +379,11 @@ def run_gui(initial: list[str] | None = None) -> int:
     out_var = tk.StringVar(value="")
     target_var = tk.StringVar(value="50")
     keepname_var = tk.BooleanVar(value=False)
-    forcealac_var = tk.BooleanVar(value=False)
     overwrite_var = tk.BooleanVar(value=True)
     parsevar_var = tk.BooleanVar(value=True)
+    FORMAT_CHOICES = {"自动（优先无损）": "auto", "MP3": "mp3",
+                      "AAC": "aac", "ALAC 无损": "alac"}
+    fmt_var = tk.StringVar(value="自动（优先无损）")
 
     ttk.Label(opt, text="输出文件夹").grid(row=0, column=0, sticky="w")
     out_entry = ttk.Entry(opt, textvariable=out_var)
@@ -286,30 +404,31 @@ def run_gui(initial: list[str] | None = None) -> int:
     ttk.Label(target_box, text="MB（0 = 不限制）", foreground=MUTED).pack(
         side="left", padx=(4, 0))
 
+    ttk.Label(opt, text="输出格式").grid(row=2, column=0, sticky="w", pady=(8, 0))
+    fmt_box = ttk.Combobox(opt, textvariable=fmt_var, state="readonly",
+                           width=16, values=list(FORMAT_CHOICES))
+    fmt_box.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
     checks = ttk.Frame(opt)
-    checks.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+    checks.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
     checks.columnconfigure(0, weight=1)
     checks.columnconfigure(1, weight=1)
-    ttk.Checkbutton(checks, text="覆盖已有的输出文件",
-                    variable=overwrite_var).grid(row=0, column=0, sticky="w",
-                                                 pady=(0, 2))
-    ttk.Checkbutton(checks, text="强制 ALAC 无损",
-                    variable=forcealac_var).grid(row=0, column=1, sticky="w",
-                                                 pady=(0, 2))
-    ttk.Checkbutton(checks, text="保留原文件名",
-                    variable=keepname_var).grid(row=1, column=0, sticky="w",
-                                               pady=(0, 2))
-    ttk.Checkbutton(checks, text="按文件名自动补全缺失信息",
-                    variable=parsevar_var).grid(row=1, column=1, sticky="w",
-                                                pady=(0, 2))
+    for row, (text, var) in enumerate((
+            ("覆盖已有的输出文件", overwrite_var),
+            ("保留原文件名", keepname_var),
+            ("按文件名自动补全缺失信息", parsevar_var))):
+        tk.Checkbutton(checks, text=text, variable=var, bg=BG,
+                       activebackground=BG, fg=TEXT, activeforeground=TEXT,
+                       highlightthickness=0, font=base_font).grid(
+            row=row // 2, column=row % 2, sticky="w", pady=(0, 2))
 
     hint = ttk.Label(
         opt, font=small_font, foreground=MUTED, justify="left",
         text="输出文件夹留空表示与源文件同目录；单曲上限填 0 表示不限制。"
              "超出上限时按「降位深 → 降采样 → 转 AAC」逐级降级，每一步都实测文件大小，"
              "封面和歌词也计入上限。缺失的标题/歌手/专辑会从文件名和文件夹名自动补全，"
-             "已有的标签永远优先。")
-    hint.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+             "已有的标签永远优先；补不全的可选中文件后用「编辑信息…」手动填写。")
+    hint.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
     # ---- actions ----
     act = ttk.Frame(outer)
@@ -393,6 +512,8 @@ def run_gui(initial: list[str] | None = None) -> int:
         idle = not state["running"]
         remove_btn.configure(state="normal" if idle and files else "disabled")
         clear_btn.configure(state="normal" if idle and files else "disabled")
+        edit_btn.configure(state="normal" if idle and len(selected_indexes()) == 1
+                           else "disabled")
 
     def worker_main(targets: list[Path], opts: Options) -> None:
         ok = warn = fail = 0
@@ -403,7 +524,8 @@ def run_gui(initial: list[str] | None = None) -> int:
             msg_queue.put(("status", f"处理中 {i}/{len(targets)}：{src.name}"))
             try:
                 res = convert_file(src, opts, lambda m: msg_queue.put(("log", m)),
-                                   cancel=cancel_event)
+                                   cancel=cancel_event,
+                                   overrides=meta_overrides.get(str(src)))
             except AMCCancelled:
                 msg_queue.put(("log", "  ⏹ 已取消"))
                 break
@@ -495,7 +617,8 @@ def run_gui(initial: list[str] | None = None) -> int:
             outdir=outdir,
             target_mb=target,
             keep_name=keepname_var.get(),
-            force_alac=forcealac_var.get(),
+            force_alac=False,
+            out_format=FORMAT_CHOICES[fmt_var.get()],
             overwrite=overwrite_var.get(),
             parse_names=parsevar_var.get(),
         )
@@ -507,7 +630,9 @@ def run_gui(initial: list[str] | None = None) -> int:
         log_line("")
         limit = "不限制" if target <= 0 else f"{target:g}MB"
         log_line(f"开始处理 {len(targets)} 个文件，单曲上限 {limit}"
-                 + ("" if opts.overwrite else "，跳过已存在的输出"))
+                 + ("" if opts.overwrite else "，跳过已存在的输出")
+                 + ("" if opts.out_format == "auto"
+                    else f"，强制输出 {fmt_var.get()}"))
         thread = threading.Thread(target=worker_main, args=(targets, opts), daemon=True)
         state["thread"] = thread
         thread.start()
@@ -543,6 +668,10 @@ def run_gui(initial: list[str] | None = None) -> int:
 
     tree.bind("<Delete>", lambda _event: remove_selected())
     tree.bind("<Control-a>", select_all)
+    tree.bind("<<TreeviewSelect>>", lambda _event: update_buttons())
+    tree.bind("<Double-1>", lambda _event: (root.after_idle(edit_meta_dialog)
+                                            if edit_btn.instate(["!disabled"])
+                                            else None))
     root.bind("<Control-o>", lambda _event: add_files())
     root.bind("<Control-Return>", lambda _event: start())
     root.bind("<Escape>", lambda _event: cancel())

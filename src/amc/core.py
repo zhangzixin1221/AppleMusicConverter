@@ -67,6 +67,7 @@ COVER_STEMS = ("cover", "folder", "front", "album", "albumart", "thumb", "artwor
 COVER_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff")
 LYRIC_EXTS = (".lrc", ".srt")
 MAX_AAC_KBPS = 512
+MAX_MP3_KBPS = 320           # libmp3lame ceiling
 ALAC_RATIO = 0.62          # typical ALAC payload / raw PCM, for reporting only
 # ALAC cannot realistically beat this fraction of raw PCM, so a rung whose raw
 # size exceeds budget/MIN_RATIO is the only one that may be skipped outright.
@@ -666,7 +667,7 @@ def probe(path: Path, repair_tags: bool = True) -> MediaInfo:
 
 @dataclass
 class Plan:
-    mode: str                       # "copy" | "remux" | "alac" | "aac"
+    mode: str                       # "copy" | "remux" | "alac" | "aac" | "mp3"
     desc: str
     out_ext: str = ".m4a"
     sample_rate: int | None = None
@@ -678,7 +679,7 @@ class Plan:
     @property
     def rewrites_audio(self) -> bool:
         """True when the plan cannot be undone without the source file."""
-        return self.mode in ("alac", "aac")
+        return self.mode in ("alac", "aac", "mp3")
 
     def label(self) -> str:
         if self.mode == "copy":
@@ -687,6 +688,8 @@ class Plan:
             return f"重新封装 {self.out_ext}（音频直通，零重编码）"
         if self.mode == "alac":
             return f"ALAC 无损 {self.sample_rate}Hz/{self._bits()}bit"
+        if self.mode == "mp3":
+            return f"MP3 {self.bitrate_kbps}kbps {self.sample_rate}Hz"
         return f"AAC {self.bitrate_kbps}kbps {self.sample_rate}Hz"
 
     def _bits(self) -> int:
@@ -753,19 +756,31 @@ def alac_might_fit(sr: int, bits: int, channels: int, duration: float,
     return raw_bytes * ALAC_MIN_RATIO <= target_bytes
 
 
-def plan_candidates(info: MediaInfo, target_bytes: int, force_alac: bool = False) -> list[Plan]:
-    """Ordered least-destructive-first list; the last entry always fits the budget."""
+def plan_candidates(info: MediaInfo, target_bytes: int, force_alac: bool = False,
+                    out_format: str = "auto") -> list[Plan]:
+    """Ordered least-destructive-first list; the last entry always fits the budget.
+
+    ``out_format`` pins the result: "auto" keeps the quality-first ladder
+    (native pass-through -> ALAC -> AAC), while "alac"/"aac"/"mp3" force that
+    output format. Forcing a format never forces a re-encode: a source already
+    carrying the chosen codec is still copied or remuxed untouched.
+    """
+    fmt = "alac" if (force_alac and out_format == "auto") else out_format
     plans: list[Plan] = []
     ch, dur = info.channels, info.duration
     sr0, bits0 = _pcm_params(info.codec, info.sample_rate, info.bits)
     budget_bps = target_bytes * 8 / max(dur, 1.0)
     allowed_kbps = max(64, min(MAX_AAC_KBPS, int(budget_bps / 1000 * 0.97)))
 
-    # 1. Already Apple-native and small enough -> do not touch the audio at all.
-    #    A source that already busts the cap is skipped: copying 400MB only to
-    #    reject it on size wastes the slowest part of the run.
-    if info.is_native and not force_alac and info.size <= target_bytes:
-        ext = container_for(info.codec)
+    # 1. Already Apple-native (in the *requested* format) and small enough ->
+    #    do not touch the audio at all. A source that already busts the cap is
+    #    skipped: copying 400MB only to reject it on size wastes the slowest
+    #    part of the run.
+    native_ok = (fmt == "auto"
+                 or (fmt == "mp3" and info.codec == "mp3")
+                 or (fmt == "aac" and info.codec == "aac"))
+    if info.is_native and native_ok and info.size <= target_bytes:
+        ext = ".mp3" if fmt == "mp3" else container_for(info.codec)
         same_container = ext == info.path.suffix.lower()
         plans.append(Plan(
             "copy" if same_container else "remux",
@@ -773,7 +788,7 @@ def plan_candidates(info: MediaInfo, target_bytes: int, force_alac: bool = False
             out_ext=ext, est_bytes=info.size))
 
     # 2. Lossless ALAC ladder, mild reductions first.
-    if info.is_lossless or force_alac:
+    if (fmt == "auto" and (info.is_lossless or force_alac)) or fmt == "alac":
         ladder: list[tuple[int, int]] = [(sr0, bits0)]
         if bits0 > 16:
             ladder.append((sr0, 16))
@@ -790,10 +805,28 @@ def plan_candidates(info: MediaInfo, target_bytes: int, force_alac: bool = False
 
     # 3. Guaranteed-to-fit fallback. Resampling stays inside the same family
     #    (88.2k -> 44.1k) so the rate converter remains a clean integer ratio.
+    lossy_cap = (max(96, int(info.bitrate / 1000 * 1.5))
+                 if info.bitrate > 0 and info.is_lossy else None)
+    if fmt == "mp3":
+        if native_ok:
+            return plans       # an MP3 already under the cap: never re-encode it
+        # libmp3lame tops out at 320kbps; step down when even that busts the
+        # budget so the size promise is kept instead of merely warned about.
+        mp3_kbps = max(64, min(MAX_MP3_KBPS, int(budget_bps / 1000 * 0.97)))
+        if lossy_cap is not None:
+            mp3_kbps = min(mp3_kbps, lossy_cap)
+        rungs = [k for k in dict.fromkeys([mp3_kbps, 192, 128, 96, 64])
+                 if k <= mp3_kbps] or [64]
+        for kbps in rungs:
+            plans.append(Plan("mp3", "MP3 转码（预算内最高码率）", out_ext=".mp3",
+                              sample_rate=_downsample_target(sr0), bitrate_kbps=kbps,
+                              est_bytes=int(kbps * 1000 * dur / 8)))
+        return plans
+
     aac_kbps = allowed_kbps
-    if info.bitrate > 0 and info.is_lossy:
+    if lossy_cap is not None:
         # Re-encoding lossy audio above its own bit rate buys nothing but bytes.
-        aac_kbps = min(aac_kbps, max(96, int(info.bitrate / 1000 * 1.5)))
+        aac_kbps = min(aac_kbps, lossy_cap)
     plans.append(Plan("aac", "AAC 转码（预算内最高码率）",
                       sample_rate=_downsample_target(sr0), bitrate_kbps=aac_kbps,
                       est_bytes=int(aac_kbps * 1000 * dur / 8)))
@@ -866,6 +899,8 @@ def encode_audio(info: MediaInfo, plan: Plan, dest: Path,
         cmd += ["-c:a", "copy"]
     elif plan.mode == "alac":
         cmd += ["-c:a", "alac", "-sample_fmt", plan.sample_fmt or "s16p"]
+    elif plan.mode == "mp3":
+        cmd += ["-c:a", "libmp3lame", "-b:a", f"{plan.bitrate_kbps}k"]
     else:
         cmd += ["-c:a", "aac", "-b:a", f"{plan.bitrate_kbps}k"]
     if plan.sample_rate:
@@ -895,18 +930,34 @@ def _split_track(value: str) -> tuple[int, int] | None:
     return int(m.group(1)), int(m.group(2) or 0)
 
 
+# Canonical metadata field -> the tag keys it may appear under. Shared by
+# tag_output(), the manual-override fill and the GUI dialog so "this field is
+# already embedded" means exactly the same thing everywhere.
+_TAG_ALIASES = {
+    "title": ("title",),
+    "artist": ("artist", "artist-0", "performer"),
+    "album": ("album",),
+    "album_artist": ("album_artist", "albumartist", "ALBUMARTIST"),
+    "date": ("date", "year", "originaldate", "originalyear"),
+    "genre": ("genre",),
+    "track": ("track", "tracknumber", "TRCK"),
+    "disc": ("disc", "discnumber", "TPOS"),
+}
+META_FIELDS = tuple(_TAG_ALIASES)
+
+
 def tag_output(dest: Path, info: MediaInfo, lyrics: str | None,
                cover: bytes | None) -> None:
     """Write all text metadata, the cover and the lyrics (UTF-8 native)."""
-    title = info.tag("title")
-    artist = info.tag("artist", "artist-0", "performer")
-    album = info.tag("album")
-    album_artist = (info.tag("album_artist", "albumartist", "ALBUMARTIST")
+    title = info.tag(*_TAG_ALIASES["title"])
+    artist = info.tag(*_TAG_ALIASES["artist"])
+    album = info.tag(*_TAG_ALIASES["album"])
+    album_artist = (info.tag(*_TAG_ALIASES["album_artist"])
                     or artist)   # Apple expects aART; the track artist mirrors fine
-    date = info.tag("date", "year", "originaldate", "originalyear")[:10]
-    genre = info.tag("genre")
-    track = _split_track(info.tag("track", "tracknumber", "TRCK"))
-    disc = _split_track(info.tag("disc", "discnumber", "TPOS"))
+    date = info.tag(*_TAG_ALIASES["date"])[:10]
+    genre = info.tag(*_TAG_ALIASES["genre"])
+    track = _split_track(info.tag(*_TAG_ALIASES["track"]))
+    disc = _split_track(info.tag(*_TAG_ALIASES["disc"]))
 
     if dest.suffix.lower() == ".mp3":
         _tag_mp3(dest, title, artist, album, album_artist, date, genre, track, disc,
@@ -985,10 +1036,12 @@ class Options:
     target_mb: float = 50.0         # 0 = no limit
     keep_name: bool = False
     force_alac: bool = False
+    out_format: str = "auto"        # auto | alac | aac | mp3
     lyrics_encoding: str | None = None
     overwrite: bool = True
     repair_tags: bool = True
     parse_names: bool = True        # fill missing tags from the file name
+    meta: dict = field(default_factory=dict)   # global manual fill (CLI --meta)
 
 
 @dataclass
@@ -1009,11 +1062,29 @@ class Result:
 
 
 _FIELD_CN = {"title": "歌名", "artist": "歌手", "album": "专辑",
-             "album_artist": "专辑歌手", "track": "音轨", "disc": "碟号"}
+             "album_artist": "专辑歌手", "date": "年份", "genre": "流派",
+             "track": "音轨", "disc": "碟号"}
+# People type "流派" on a Chinese keyboard far more readily than "genre", so
+# --meta accepts either spelling; only the canonical key reaches the tags.
+_FIELD_INPUT = {**{k: k for k in META_FIELDS},
+                **{cn: k for k, cn in _FIELD_CN.items()}}
+
+
+def normalize_meta_key(key: str) -> str | None:
+    """Map a user-facing field name (English or 中文) to its canonical key."""
+    return _FIELD_INPUT.get(key.strip().lower())
 
 
 def convert_file(src: Path, opts: Options, log: Callable[[str], None],
-                 cancel: "Event | None" = None) -> Result:
+                 cancel: "Event | None" = None,
+                 overrides: "dict | None" = None) -> Result:
+    """Convert one file.
+
+    Metadata precedence is strict: embedded tags win, then the caller's manual
+    ``overrides`` (per-file dict, merged over the global ``opts.meta``), then the
+    filename parse. Neither manual input nor the parser can clobber a field the
+    file already carries.
+    """
     res = Result(src=src)
     try:
         info = probe(src, repair_tags=opts.repair_tags)
@@ -1021,12 +1092,20 @@ def convert_file(src: Path, opts: Options, log: Callable[[str], None],
         res.error = str(exc)
         return res
 
+    manual = {**opts.meta, **(overrides or {})}
+    filled_manual = []
+    for key in META_FIELDS:
+        value = str(manual.get(key, "") or "").strip()
+        if value and not info.tag(*_TAG_ALIASES[key]):
+            info.tags[key] = value
+            filled_manual.append(_FIELD_CN[key])
+
     # Untagged downloads ("01. 歌手 - 歌名.flac") still know who they are:
     # the name is parsed and fills *only* the fields the tags actually miss,
     # so a real embedded title is never overwritten by a guess.
+    filled = []
     if opts.parse_names:
         guessed = parse_names_from_path(src)
-        filled = []
         for guess_key, field in (("title", "title"), ("artist", "artist"),
                                  ("album", "album"),
                                  ("track", "track"), ("disc", "disc")):
@@ -1034,8 +1113,14 @@ def convert_file(src: Path, opts: Options, log: Callable[[str], None],
             if guess and not info.tag(guess_key):
                 info.tags[guess_key] = guess
                 filled.append(_FIELD_CN[guess_key])
-        if filled:
-            res.meta_from = "文件名补全: " + "、".join(filled)
+
+    segments = []
+    if filled_manual:
+        segments.append("手动填写: " + "、".join(filled_manual))
+    if filled:
+        segments.append("文件名补全: " + "、".join(filled))
+    if segments:
+        res.meta_from = "; ".join(segments)
 
     lyrics, lyrics_from = find_lyrics(src, info.tags, opts.lyrics_encoding,
                                       repair=opts.repair_tags)
@@ -1064,7 +1149,8 @@ def convert_file(src: Path, opts: Options, log: Callable[[str], None],
         # cover walks straight through the promised cap.
         overhead = len(cover or b"") + len((lyrics or "").encode("utf-8")) + 16 * 1024
         audio_budget = UNLIMITED_BYTES if unlimited else max(0, target_bytes - overhead)
-        plans = plan_candidates(info, audio_budget, opts.force_alac)
+        plans = plan_candidates(info, audio_budget, opts.force_alac,
+                                opts.out_format)
 
         log(f"  源: {info.codec} {info.sample_rate}Hz/{info.bits}bit/{info.channels}ch "
             f"{info.duration:.0f}s {info.size/1048576:.1f}MB")
