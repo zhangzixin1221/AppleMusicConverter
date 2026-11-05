@@ -282,11 +282,11 @@ pytest                      :: 全部测试
 pytest -m "not integration" :: 只跑纯逻辑测试（不需要 ffmpeg）
 ```
 
-测试分三层：
+测试分四层（共 204 项）：
 
-- **纯逻辑测试**（`tests/test_core.py` 103 项 + `tests/test_nameparse.py` 17 项）覆盖歌词清理、编码嗅探、乱码修复、文件命名、文件名元数据识别、编码方案规划、封面类型识别。不碰外部程序。
+- **纯逻辑测试**（`tests/test_core.py` 103 项 + `tests/test_nameparse.py` 19 项 + `tests/test_output_format.py` 23 项 + `tests/test_argv.py` 4 项）覆盖歌词清理、编码嗅探、乱码修复、文件命名、文件名元数据识别、编码方案规划、封面类型识别、输出格式规划、手工填写的键名归一化、被 shell 拆开的路径重新拼回。不碰外部程序。
 - **界面布局测试**（`tests/test_gui_layout.py`，20 项）真的把窗口建出来，然后验证用户提的那几个要求：开窗时没有任何控件被裁掉、每个标签和按钮都拿到了它需要的宽度（文字不会被压掉）、放大缩小窗口时列表和日志同步伸缩、按钮尺寸始终等于它自己的自然尺寸。没有图形环境时自动跳过。
-- **端到端测试**（`tests/test_integration.py`，29 项）用真实 ffmpeg 生成素材，验证「跑完的结果究竟对不对」：封面和歌词是否真的写进文件、上限是否真的守住（含封面）、重复运行是否原地替换、重新编码是否会毁掉源文件、编码失败是否破坏旧输出、文件名补全是否真的写进 `©nam/©ART/trkn`、Matroska 流级标签是否存活、老 MP3 的 GBK-as-Latin-1 标签是否被修好。**没有 ffmpeg 时这一层会自动跳过**；CI 里用 `AMC_REQUIRE_FFMPEG=1` 把它变成硬性要求，避免「一个都没跑也算通过」。
+- **端到端测试**（`tests/test_integration.py`，35 项）用真实 ffmpeg 生成素材，验证「跑完的结果究竟对不对」：封面和歌词是否真的写进文件、上限是否真的守住（含封面）、重复运行是否原地替换、重新编码是否会毁掉源文件、编码失败是否破坏旧输出、文件名补全是否真的写进 `©nam/©ART/trkn`、Matroska 流级标签是否存活、老 MP3 的 GBK-as-Latin-1 标签是否被修好、手工填写的字段是否只补空缺而不覆盖内嵌值、按文件填写的值是否串到别的文件、强制 MP3/AAC 是否真的落到对应容器里。**没有 ffmpeg 时这一层会自动跳过**；CI 里用 `AMC_REQUIRE_FFMPEG=1` 把它变成硬性要求，避免「一个都没跑也算通过」。
 
 ### 项目结构
 
@@ -304,6 +304,8 @@ AppleMusicConverter/
 │   ├── conftest.py      # ffmpeg 探测 + 素材工厂
 │   ├── test_core.py     # 纯逻辑
 │   ├── test_nameparse.py   # 文件名识别
+│   ├── test_output_format.py  # 输出格式规划与键名归一化
+│   ├── test_argv.py        # 被拆开的命令行路径重新拼回
 │   ├── test_gui_layout.py  # 界面布局与自适应
 │   └── test_integration.py
 ├── run_amc.py           # 打包用入口
