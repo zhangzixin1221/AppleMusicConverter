@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="输出文件已存在时跳过，而不是原地替换")
     p.add_argument("--no-tag-repair", dest="repair_tags", action="store_false",
                    help="关闭标签乱码自动修复（修复猜错时使用）")
+    p.add_argument("--no-name-parse", dest="parse_names", action="store_false",
+                   help="关闭「文件名补全」：标签缺失时不再从文件名猜歌名/歌手/专辑")
     p.add_argument("--quiet", "-q", action="store_true", help="只输出每个文件的结果行")
     p.add_argument("--gui", action="store_true", help="打开图形界面")
     p.add_argument("--check", action="store_true", help="只检查环境（ffmpeg 是否可用）")
@@ -82,6 +84,7 @@ def run_cli(args) -> int:
         lyrics_encoding=args.lyrics_encoding,
         overwrite=args.overwrite,
         repair_tags=args.repair_tags,
+        parse_names=args.parse_names,
     )
 
     def log(msg: str) -> None:
@@ -126,6 +129,7 @@ def run_cli(args) -> int:
             warn += 1
         log(f"  ✓ {res.dest.name}  {fmt_size(res.size)}  [{res.plan.label()}]")
         log(f"    歌词: {res.lyrics_from}   封面: {res.cover_from}"
+            f"   信息: {res.meta_from}"
             + (f"   ⚠ {'; '.join(flags)}" if flags else ""))
         ok += 1
 

@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable
 
+from .nameparse import parse_path as parse_names_from_path
+
 if TYPE_CHECKING:                       # pragma: no cover - typing only
     from threading import Event
 
@@ -43,7 +45,7 @@ if TYPE_CHECKING:                       # pragma: no cover - typing only
 # --------------------------------------------------------------------------
 
 LOSSLESS_CODECS = {
-    "flac", "alac", "ape", "wavpack", "tta", "tak",
+    "flac", "alac", "ape", "wavpack", "tta", "tak", "mlp", "truehd", "shorten",
     "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le",
     "pcm_s16be", "pcm_s24be", "pcm_s32be", "pcm_u8", "pcm_s8",
     "adpcm_ima_wav", "adpcm_ms",
@@ -52,6 +54,7 @@ LOSSLESS_CODECS = {
 LOSSY_CODECS = {
     "mp3", "mp2", "aac", "ac3", "eac3", "vorbis", "opus", "wmav1", "wmav2",
     "wmapro", "atrac3", "atrac3p", "mp1", "amrnb", "amrwb", "cook", "adpcm",
+    "mpc7", "mpc8",
 }
 APPLE_NATIVE = {"mp3", "aac", "alac"}          # Apple Music plays these as-is
 AUDIO_EXTS = {
@@ -633,6 +636,15 @@ def probe(path: Path, repair_tags: bool = True) -> MediaInfo:
         # audio-only figure from the duration instead.
         bitrate = int(size * 8 / duration)
 
+    # Container tags win, but several formats (matroska .mka, Ogg families)
+    # keep title/artist on the *stream*, and reading only format.tags would
+    # silently drop them -- taking the first audio stream's tags as a fallback
+    # keeps the metadata (and the "artist - title" output name) intact.
+    tags = dict(fmt.get("tags") or {})
+    for stream in streams:
+        for key, value in (stream.get("tags") or {}).items():
+            tags.setdefault(key, value)
+
     return MediaInfo(
         path=path,
         codec=codec,
@@ -641,7 +653,7 @@ def probe(path: Path, repair_tags: bool = True) -> MediaInfo:
         bits=bits,
         duration=duration,
         size=size,
-        tags=dict(fmt.get("tags") or {}),
+        tags=tags,
         streams=streams,
         bitrate=bitrate,
         repair=repair_tags,
@@ -887,13 +899,14 @@ def tag_output(dest: Path, info: MediaInfo, lyrics: str | None,
                cover: bytes | None) -> None:
     """Write all text metadata, the cover and the lyrics (UTF-8 native)."""
     title = info.tag("title")
-    artist = info.tag("artist")
+    artist = info.tag("artist", "artist-0", "performer")
     album = info.tag("album")
-    album_artist = info.tag("album_artist", "albumartist", "ALBUMARTIST")
-    date = info.tag("date", "year", "originaldate")[:10]
+    album_artist = (info.tag("album_artist", "albumartist", "ALBUMARTIST")
+                    or artist)   # Apple expects aART; the track artist mirrors fine
+    date = info.tag("date", "year", "originaldate", "originalyear")[:10]
     genre = info.tag("genre")
-    track = _split_track(info.tag("track", "TRCK"))
-    disc = _split_track(info.tag("disc", "TPOS"))
+    track = _split_track(info.tag("track", "tracknumber", "TRCK"))
+    disc = _split_track(info.tag("disc", "discnumber", "TPOS"))
 
     if dest.suffix.lower() == ".mp3":
         _tag_mp3(dest, title, artist, album, album_artist, date, genre, track, disc,
@@ -975,6 +988,7 @@ class Options:
     lyrics_encoding: str | None = None
     overwrite: bool = True
     repair_tags: bool = True
+    parse_names: bool = True        # fill missing tags from the file name
 
 
 @dataclass
@@ -985,12 +999,17 @@ class Result:
     size: int = 0
     lyrics_from: str = "无"
     cover_from: str = "无"
+    meta_from: str = "内嵌标签"
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.error is None
+
+
+_FIELD_CN = {"title": "歌名", "artist": "歌手", "album": "专辑",
+             "album_artist": "专辑歌手", "track": "音轨", "disc": "碟号"}
 
 
 def convert_file(src: Path, opts: Options, log: Callable[[str], None],
@@ -1001,6 +1020,22 @@ def convert_file(src: Path, opts: Options, log: Callable[[str], None],
     except AMCError as exc:
         res.error = str(exc)
         return res
+
+    # Untagged downloads ("01. 歌手 - 歌名.flac") still know who they are:
+    # the name is parsed and fills *only* the fields the tags actually miss,
+    # so a real embedded title is never overwritten by a guess.
+    if opts.parse_names:
+        guessed = parse_names_from_path(src)
+        filled = []
+        for guess_key, field in (("title", "title"), ("artist", "artist"),
+                                 ("album", "album"),
+                                 ("track", "track"), ("disc", "disc")):
+            guess = guessed.get(field)
+            if guess and not info.tag(guess_key):
+                info.tags[guess_key] = guess
+                filled.append(_FIELD_CN[guess_key])
+        if filled:
+            res.meta_from = "文件名补全: " + "、".join(filled)
 
     lyrics, lyrics_from = find_lyrics(src, info.tags, opts.lyrics_encoding,
                                       repair=opts.repair_tags)

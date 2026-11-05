@@ -12,6 +12,8 @@ Layout notes
   entries and labels keep their natural size -- no widget is ever stretched out
   of proportion.
 * Hint labels wrap to the current width instead of being truncated.
+* Visual style: flat "clam" palette with an accent colour, a column file list,
+  and a dark console-style log. Pure ttk/tkinter -- no extra dependencies.
 """
 
 from __future__ import annotations
@@ -30,6 +32,69 @@ from .core import (AMCCancelled, AMCError, Options, collect_inputs, convert_file
 PREFERRED_WIDTH = 900
 PREFERRED_HEIGHT = 660
 MUTED = "#5b6470"
+
+# Palette ---------------------------------------------------------------
+BG = "#f3f5f9"          # window background
+CARD = "#ffffff"        # fields and buttons
+ACCENT = "#0a74e8"      # Apple-blue-ish accent
+ACCENT_DARK = "#0860c0"
+ACCENT_SOFT = "#d6e8fb"
+TEXT = "#1d2330"
+BORDER = "#cdd5e0"
+LOG_BG = "#12161f"      # dark console for the log pane
+LOG_FG = "#d6deeb"
+OK = "#2fa36b"
+FAIL = "#d4524f"
+WARN = "#c8811f"
+
+
+def _apply_style(ttk) -> None:
+    """Flat themed look on stock ttk. Everything degrades gracefully."""
+    style = ttk.Style()
+    if "clam" in style.theme_names():
+        style.theme_use("clam")
+
+    style.configure(".", background=BG, foreground=TEXT)
+    style.configure("TFrame", background=BG)
+    style.configure("TLabelframe", background=BG, bordercolor=BORDER,
+                    lightcolor=BG, darkcolor=BG)
+    style.configure("TLabelframe.Label", background=BG, foreground=ACCENT,
+                    font=("Microsoft YaHei UI", 9, "bold"))
+    style.configure("TLabel", background=BG, foreground=TEXT)
+    style.configure("TSeparator", background=BORDER)
+    style.configure("TCheckbutton", background=BG, foreground=TEXT,
+                    focuscolor=BG)
+    style.configure("TEntry", fieldbackground=CARD, bordercolor=BORDER,
+                    lightcolor=CARD, darkcolor=CARD, padding=4)
+    style.configure("TSpinbox", fieldbackground=CARD, bordercolor=BORDER,
+                    arrowcolor=ACCENT, padding=4)
+    style.configure("Horizontal.TProgressbar", background=ACCENT,
+                    troughcolor="#e2e7f0", bordercolor=BORDER, lightcolor=BG,
+                    darkcolor=BG, thickness=10)
+    style.configure("TButton", background=CARD, foreground=TEXT,
+                    bordercolor=BORDER, lightcolor=CARD, darkcolor=CARD,
+                    focusthickness=0, padding=(10, 4))
+    style.map("TButton",
+              background=[("active", "#eef2f8"), ("disabled", "#eceff4")],
+              foreground=[("disabled", "#9aa3b2")],
+              bordercolor=[("active", ACCENT)])
+    style.configure("Accent.TButton", background=ACCENT, foreground="#ffffff",
+                    bordercolor=ACCENT, lightcolor=ACCENT, darkcolor=ACCENT,
+                    padding=(14, 5))
+    style.map("Accent.TButton",
+              background=[("active", ACCENT_DARK), ("disabled", "#9db6cf")],
+              foreground=[("disabled", "#ffffff")],
+              bordercolor=[("active", ACCENT_DARK)])
+    style.configure("TScrollbar", background="#dfe5ee", troughcolor=BG,
+                    bordercolor=BG, lightcolor=BG, darkcolor=BG, arrowsize=0)
+    style.map("TScrollbar", background=[("active", "#c3ccd9")])
+    style.configure("Treeview", background=CARD, fieldbackground=CARD,
+                    bordercolor=BORDER, rowheight=26, padding=2)
+    style.map("Treeview",
+              background=[("selected", ACCENT_SOFT)],
+              foreground=[("selected", TEXT)])
+    style.configure("Treeview.Heading", background="#e9edf4", foreground=MUTED,
+                    bordercolor=BORDER, relief="flat", padding=(6, 3))
 
 
 # --------------------------------------------------------------------------
@@ -53,6 +118,7 @@ def run_gui(initial: list[str] | None = None) -> int:
 
     root = tk.Tk()
     root.title(f"AMC · Apple Music 格式转换器 {__version__}")
+    root.configure(background=BG)
 
     files: list[str] = list(initial or [])
     msg_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -60,10 +126,19 @@ def run_gui(initial: list[str] | None = None) -> int:
     state: dict[str, object] = {"thread": None, "running": False, "last_outdir": None}
 
     base_font = tkfont.nametofont("TkDefaultFont")
+    try:
+        if "Microsoft YaHei UI" in tkfont.families():
+            base_font.configure(family="Microsoft YaHei UI", size=10)
+    except tk.TclError:
+        pass
     title_font = base_font.copy()
     title_font.configure(size=base_font.cget("size") + 4, weight="bold")
     small_font = base_font.copy()
     small_font.configure(size=max(7, base_font.cget("size") - 1))
+    mono_font = tkfont.nametofont("TkFixedFont").copy()
+    mono_font.configure(size=base_font.cget("size"))
+
+    _apply_style(ttk)
 
     # ---------------- layout ----------------
     outer = ttk.Frame(root, padding=(12, 10, 12, 10))
@@ -77,12 +152,14 @@ def run_gui(initial: list[str] | None = None) -> int:
     header = ttk.Frame(outer)
     header.grid(row=0, column=0, sticky="ew")
     header.columnconfigure(1, weight=1)
-    ttk.Label(header, text="AMC · Apple Music 格式转换器", font=title_font).grid(
-        row=0, column=0, sticky="w")
+    ttk.Label(header, text="AMC · Apple Music 格式转换器", font=title_font,
+              foreground=ACCENT).grid(row=0, column=0, sticky="w")
     ttk.Label(header, text=f"v{__version__}", font=small_font,
               foreground=MUTED).grid(row=0, column=1, sticky="e")
-    ttk.Separator(outer, orient="horizontal").grid(row=1, column=0, sticky="ew",
-                                                   pady=(6, 10))
+    accent_bar = tk.Frame(outer, height=3, background=ACCENT, bd=0,
+                          highlightthickness=0)
+    accent_bar.grid(row=1, column=0, sticky="ew", pady=(6, 10))
+    accent_bar.grid_propagate(False)
 
     # ---- file list ----
     list_frame = ttk.LabelFrame(outer, text="待转换文件", padding=(8, 6, 8, 8))
@@ -90,13 +167,20 @@ def run_gui(initial: list[str] | None = None) -> int:
     list_frame.columnconfigure(0, weight=1)
     list_frame.rowconfigure(0, weight=1)
 
-    listbox = tk.Listbox(list_frame, selectmode="extended", activestyle="none",
-                         height=9, width=58, exportselection=False,
-                         highlightthickness=1, borderwidth=0)
-    list_vsb = ttk.Scrollbar(list_frame, orient="vertical", command=listbox.yview)
-    list_hsb = ttk.Scrollbar(list_frame, orient="horizontal", command=listbox.xview)
-    listbox.configure(yscrollcommand=list_vsb.set, xscrollcommand=list_hsb.set)
-    listbox.grid(row=0, column=0, sticky="nsew")
+    tree = ttk.Treeview(list_frame, columns=("dir", "size"), height=9,
+                        selectmode="extended")
+    tree.heading("#0", text="文件", anchor="w")
+    tree.heading("dir", text="所在文件夹", anchor="w")
+    tree.heading("size", text="大小", anchor="e")
+    tree.column("#0", width=340, minwidth=180, stretch=True)
+    tree.column("dir", width=260, minwidth=110, stretch=True)
+    tree.column("size", width=76, minwidth=56, stretch=False, anchor="e")
+    tree.tag_configure("even", background=CARD)
+    tree.tag_configure("odd", background="#f7f9fc")
+    list_vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+    list_hsb = ttk.Scrollbar(list_frame, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=list_vsb.set, xscrollcommand=list_hsb.set)
+    tree.grid(row=0, column=0, sticky="nsew")
     list_vsb.grid(row=0, column=1, sticky="ns")
     list_hsb.grid(row=1, column=0, sticky="ew")
 
@@ -105,9 +189,16 @@ def run_gui(initial: list[str] | None = None) -> int:
     subfolders_var = tk.BooleanVar(value=True)
 
     def refresh() -> None:
-        listbox.delete(0, "end")
-        for f in files:
-            listbox.insert("end", f)
+        tree.delete(*tree.get_children())
+        for i, f in enumerate(files):
+            p = Path(f)
+            try:
+                size = fmt_size(p.stat().st_size)
+            except OSError:
+                size = ""
+            folder = p.parent.name if p.parent.name else str(p.parent)
+            tree.insert("", "end", iid=str(i), text=p.name, values=(folder, size),
+                        tags=("even" if i % 2 == 0 else "odd",))
         list_frame.configure(text=f"待转换文件（{len(files)} 个）")
         update_buttons()
 
@@ -115,7 +206,8 @@ def run_gui(initial: list[str] | None = None) -> int:
         picked = filedialog.askopenfilenames(
             title="选择音频文件",
             filetypes=[("音频文件", "*.flac *.wav *.aiff *.aif *.ape *.wv *.mp3 *.m4a *.aac "
-                                  "*.ogg *.opus *.wma *.dsf *.dff *.tta *.tak"),
+                                  "*.ogg *.opus *.wma *.dsf *.dff *.tta *.tak *.mka *.mpc "
+                                  "*.mp4 *.ac3 *.w64 *.amr *.au *.snd"),
                        ("所有文件", "*.*")])
         for f in picked:
             if f not in files:
@@ -137,11 +229,14 @@ def run_gui(initial: list[str] | None = None) -> int:
         log_line(f"从文件夹加入 {added} 个文件"
                  + ("（含子文件夹）" if subfolders_var.get() else "（不含子文件夹）"))
 
+    def selected_indexes() -> list[int]:
+        return sorted(int(iid) for iid in tree.selection())
+
     def remove_selected() -> None:
-        selection = listbox.curselection()
+        selection = selected_indexes()
         if not selection:
             return
-        for idx in sorted(selection, reverse=True):
+        for idx in reversed(selection):
             del files[idx]
         refresh()
 
@@ -170,6 +265,7 @@ def run_gui(initial: list[str] | None = None) -> int:
     keepname_var = tk.BooleanVar(value=False)
     forcealac_var = tk.BooleanVar(value=False)
     overwrite_var = tk.BooleanVar(value=True)
+    parsevar_var = tk.BooleanVar(value=True)
 
     ttk.Label(opt, text="输出文件夹").grid(row=0, column=0, sticky="w")
     out_entry = ttk.Entry(opt, textvariable=out_var)
@@ -184,29 +280,42 @@ def run_gui(initial: list[str] | None = None) -> int:
 
     ttk.Label(opt, text="单曲上限").grid(row=1, column=0, sticky="w", pady=(8, 0))
     target_box = ttk.Frame(opt)
-    target_box.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0))
+    target_box.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
     ttk.Spinbox(target_box, from_=0, to=2000, increment=5, width=7,
                 textvariable=target_var).pack(side="left")
-    ttk.Label(target_box, text="MB", foreground=MUTED).pack(side="left", padx=(4, 16))
-    ttk.Checkbutton(target_box, text="覆盖已有的输出文件",
-                    variable=overwrite_var).pack(side="right")
-    ttk.Checkbutton(target_box, text="强制 ALAC 无损",
-                    variable=forcealac_var).pack(side="right", padx=(0, 12))
-    ttk.Checkbutton(target_box, text="保留原文件名",
-                    variable=keepname_var).pack(side="right", padx=(0, 12))
+    ttk.Label(target_box, text="MB（0 = 不限制）", foreground=MUTED).pack(
+        side="left", padx=(4, 0))
+
+    checks = ttk.Frame(opt)
+    checks.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+    checks.columnconfigure(0, weight=1)
+    checks.columnconfigure(1, weight=1)
+    ttk.Checkbutton(checks, text="覆盖已有的输出文件",
+                    variable=overwrite_var).grid(row=0, column=0, sticky="w",
+                                                 pady=(0, 2))
+    ttk.Checkbutton(checks, text="强制 ALAC 无损",
+                    variable=forcealac_var).grid(row=0, column=1, sticky="w",
+                                                 pady=(0, 2))
+    ttk.Checkbutton(checks, text="保留原文件名",
+                    variable=keepname_var).grid(row=1, column=0, sticky="w",
+                                               pady=(0, 2))
+    ttk.Checkbutton(checks, text="按文件名自动补全缺失信息",
+                    variable=parsevar_var).grid(row=1, column=1, sticky="w",
+                                                pady=(0, 2))
 
     hint = ttk.Label(
         opt, font=small_font, foreground=MUTED, justify="left",
         text="输出文件夹留空表示与源文件同目录；单曲上限填 0 表示不限制。"
              "超出上限时按「降位深 → 降采样 → 转 AAC」逐级降级，每一步都实测文件大小，"
-             "封面和歌词也计入上限。")
-    hint.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+             "封面和歌词也计入上限。缺失的标题/歌手/专辑会从文件名和文件夹名自动补全，"
+             "已有的标签永远优先。")
+    hint.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
     # ---- actions ----
     act = ttk.Frame(outer)
     act.grid(row=4, column=0, sticky="ew", **pad)
     act.columnconfigure(2, weight=1)
-    start_btn = ttk.Button(act, text="开始转换")
+    start_btn = ttk.Button(act, text="开始转换", style="Accent.TButton")
     start_btn.grid(row=0, column=0, sticky="w")
     cancel_btn = ttk.Button(act, text="取消", state="disabled")
     cancel_btn.grid(row=0, column=1, sticky="w", padx=(6, 12))
@@ -220,16 +329,32 @@ def run_gui(initial: list[str] | None = None) -> int:
     log_frame.grid(row=5, column=0, sticky="nsew", **pad)
     log_frame.columnconfigure(0, weight=1)
     log_frame.rowconfigure(0, weight=1)
-    log_text = tk.Text(log_frame, height=9, width=58, wrap="word", state="disabled",
-                       highlightthickness=1, borderwidth=0)
+    log_text = tk.Text(log_frame, height=9, wrap="word", state="disabled",
+                       background=LOG_BG, foreground=LOG_FG, insertbackground=LOG_FG,
+                       relief="flat", highlightthickness=1,
+                       highlightbackground=BORDER, font=mono_font, padx=8, pady=6)
+    for tag, colour in (("ok", OK), ("fail", FAIL), ("warn", WARN),
+                        ("muted", "#8fa1bb")):
+        log_text.tag_configure(tag, foreground=colour)
     log_vsb = ttk.Scrollbar(log_frame, orient="vertical", command=log_text.yview)
     log_text.configure(yscrollcommand=log_vsb.set)
     log_text.grid(row=0, column=0, sticky="nsew")
     log_vsb.grid(row=0, column=1, sticky="ns")
 
+    def _tag_for(text: str) -> str | None:
+        if text.startswith("  ✓"):
+            return "ok"
+        if text.startswith("  ✗") or text.startswith("✗"):
+            return "fail"
+        if text.startswith("  ⏹") or "⚠" in text:
+            return "warn"
+        if text.startswith("    ") or text.startswith("  源:"):
+            return "muted"
+        return None
+
     def log_line(text: str) -> None:
         log_text.configure(state="normal")
-        log_text.insert("end", text + "\n")
+        log_text.insert("end", text + "\n", _tag_for(text))
         log_text.see("end")
         log_text.configure(state="disabled")
 
@@ -296,9 +421,9 @@ def run_gui(initial: list[str] | None = None) -> int:
                     warn += 1
                 extra = f"   ⚠ {'; '.join(res.warnings)}" if res.warnings else ""
                 msg_queue.put(("log", f"  ✓ {res.dest.name}  {fmt_size(res.size)}"
-                                     f"  [{res.plan.label()}]"))
+                                      f"  [{res.plan.label()}]"))
                 msg_queue.put(("log", f"    歌词: {res.lyrics_from}   封面: "
-                                     f"{res.cover_from}{extra}"))
+                                      f"{res.cover_from}   信息: {res.meta_from}{extra}"))
                 ok += 1
             msg_queue.put(("tick", (i, len(targets))))
 
@@ -372,6 +497,7 @@ def run_gui(initial: list[str] | None = None) -> int:
             keep_name=keepname_var.get(),
             force_alac=forcealac_var.get(),
             overwrite=overwrite_var.get(),
+            parse_names=parsevar_var.get(),
         )
         state["last_outdir"] = outdir or targets[0].parent
         cancel_event.clear()
@@ -412,11 +538,11 @@ def run_gui(initial: list[str] | None = None) -> int:
     # ---------------- keyboard shortcuts ----------------
     # Scoped to the list so Delete never eats a keystroke meant for the entries.
     def select_all(_event=None):
-        listbox.select_set(0, "end")
+        tree.selection_set(*tree.get_children())
         return "break"
 
-    listbox.bind("<Delete>", lambda _event: remove_selected())
-    listbox.bind("<Control-a>", select_all)
+    tree.bind("<Delete>", lambda _event: remove_selected())
+    tree.bind("<Control-a>", select_all)
     root.bind("<Control-o>", lambda _event: add_files())
     root.bind("<Control-Return>", lambda _event: start())
     root.bind("<Escape>", lambda _event: cancel())

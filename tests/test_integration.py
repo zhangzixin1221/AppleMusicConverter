@@ -366,3 +366,106 @@ def test_tag_repair_can_be_turned_off(media):
 
     assert mp4_tags(repaired.dest)["\xa9ART"] == ["郁可唯"]
     assert mp4_tags(kept.dest)["\xa9ART"] == [mangled]
+
+
+# --------------------------------------------------------------------------
+# filename -> metadata fallback (v1.2)
+# --------------------------------------------------------------------------
+
+def test_untagged_download_gets_metadata_from_its_name(media):
+    """``陈绮贞 - 花的姿态/03 躺在我的星.flac`` with no tags at all still has
+    to arrive in Apple Music knowing its title, artist, album and track."""
+    album_dir = media.dir / "陈绮贞 - 花的姿态"
+    album_dir.mkdir()
+    src = media.tone(str(Path(album_dir.name, "03 躺在我的星.flac")))
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50)
+
+    assert res.ok, res.error
+    tags = mp4_tags(res.dest)
+    assert tags["\xa9nam"] == ["躺在我的星"]
+    assert tags["\xa9ART"] == ["陈绮贞"]
+    assert tags["\xa9alb"] == ["花的姿态"]
+    assert tags["trkn"] == [(3, 0)]
+    assert "文件名补全" in res.meta_from
+
+
+def test_embedded_tags_outrank_the_filename(media):
+    album_dir = media.dir / "假歌手 - 假专辑"
+    album_dir.mkdir()
+    src = media.tone(str(Path(album_dir.name, "09 假歌名.flac")),
+                     tags={"title": "真标题", "artist": "真歌手", "album": "真专辑",
+                           "track": "1"})
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50)
+
+    assert res.ok, res.error
+    tags = mp4_tags(res.dest)
+    assert tags["\xa9nam"] == ["真标题"]
+    assert tags["\xa9ART"] == ["真歌手"]
+    assert tags["\xa9alb"] == ["真专辑"]
+    assert res.meta_from == "内嵌标签"
+
+
+def test_name_parsing_can_be_disabled(media):
+    album_dir = media.dir / "五月天 - 后青春期的诗"
+    album_dir.mkdir()
+    src = media.tone(str(Path(album_dir.name, "02 突然好想你.flac")))
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50, parse_names=False)
+
+    assert res.ok, res.error
+    tags = mp4_tags(res.dest)
+    assert "\xa9nam" not in tags
+    assert res.meta_from == "内嵌标签"
+
+
+# --------------------------------------------------------------------------
+# stream-level tags (v1.2: .mka/.oga used to lose them)
+# --------------------------------------------------------------------------
+
+def test_matroska_stream_tags_reach_the_output(media):
+    """Matroska stores per-stream tags; ffprobe reports them on the stream, not
+    the container, and the old probe read only container tags."""
+    src = media.dir / "song.mka"
+    run_ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+               "-c:a", "flac", "-map_metadata", "-1",
+               "-metadata:s:a:0", "title=流内标题", "-metadata:s:a:0", "artist=流内歌手",
+               src)
+
+    info = core.probe(src)
+    assert info.tag("title") == "流内标题"
+    assert info.tag("artist") == "流内歌手"
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50, parse_names=False)
+    assert res.ok, res.error
+    tags = mp4_tags(res.dest)
+    assert tags["\xa9nam"] == ["流内标题"]
+    assert tags["\xa9ART"] == ["流内歌手"]
+
+
+# --------------------------------------------------------------------------
+# mojibake end-to-end through a real ID3v2.3 frame
+# --------------------------------------------------------------------------
+
+@pytest.mark.skipif(not can_encode("libmp3lame"), reason="ffmpeg 缺少 MP3 编码器")
+def test_gbk_bytes_in_latin1_id3_frame_are_repaired(media):
+    """A Chinese-tagged MP3 ripped by old Windows tools: the frame claims
+    ISO-8859-1 but carries GBK bytes. The copy path must arrive at clean UTF-16
+    frames, not propagate the mojibake."""
+    src = media.tone("old.mp3", codec="libmp3lame", bitrate="192k", seconds=3.0)
+    from mutagen.id3 import ID3, TIT2, TPE1
+    mangled = "周杰伦".encode("gb18030").decode("latin-1")
+    tag = ID3()
+    tag.add(TPE1(encoding=0, text=[mangled]))   # latin-1 frames -> raw GBK bytes
+    tag.add(TIT2(encoding=3, text=["夜曲"]))     # proper UTF-16 neighbour frame
+    tag.save(src, v2_version=3)
+
+    res, _ = convert(src, outdir=media.dir / "out", target_mb=50, parse_names=False)
+
+    assert res.ok, res.error
+    from mutagen.id3 import ID3 as Read3
+    tags = Read3(str(res.dest))
+    assert str(tags["TPE1"]) == "周杰伦", "乱码必须被修好"
+    assert str(tags["TIT2"]) == "夜曲"           # was already clean
+    assert tags.version == (2, 3, 0)
